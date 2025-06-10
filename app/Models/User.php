@@ -98,6 +98,18 @@ class User extends Authenticatable
         return $this->hasMany(Report::class, 'reporter_id');
     }
 
+    public function responseReports()
+    {
+        return $this->hasManyThrough(
+            Report::class,
+            Reply::class,
+            'user_id',     // Foreign key on responses table
+            'reportable_id', // Foreign key on reports table
+            'id',          // Local key on users table
+            'id'           // Local key on responses table
+        )->where('reports.reportable_type', 'App\Models\Response');
+    }
+
     public function processedReports()
     {
         return $this->hasMany(Report::class, 'moderator_id')
@@ -117,6 +129,10 @@ class User extends Authenticatable
         return $this->hasMany(Reply::class, 'moderator_id');
     }
 
+    public function isBlocked()
+    {
+        return $this->is_blocked && now()->lessThan($this->blocked_until);
+    }
 
     /**
      * The attributes that should be hidden for serialization.

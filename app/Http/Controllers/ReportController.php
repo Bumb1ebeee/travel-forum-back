@@ -67,25 +67,73 @@ class ReportController extends Controller
             ]);
 
             $report = Report::findOrFail($reportId);
-
             $user = Auth::guard('sanctum')->user();
-            if (!$user || $user->role !== 'moderator') {
+
+            if (!$user) {
                 return response()->json(['message' => 'Доступ запрещён'], 403);
             }
 
+            // Проверка прав модерации
+            if ($user->role !== 'moderator' && $user->role !== 'admin') {
+                if ($report->reportable_type === 'App\Models\Reply') {
+                    $reply = $report->reportable;
+                    if (!$reply || $reply->discussion?->user_id !== $user->id) {
+                        return response()->json(['message' => 'Доступ запрещён'], 403);
+                    }
+                } else {
+                    return response()->json(['message' => 'Доступ запрещён'], 403);
+                }
+            }
+
+            // Обновляем статус жалобы
             $report->update([
                 'status' => $request->status,
                 'moderator_comment' => $request->comment,
-                'moderator_id' => $user->id, // Добавляем moderator_id
+                'moderator_id' => $user->id,
             ]);
+
+            // Получаем объект, на который подана жалоба
+            $reportable = $report->reportable;
 
             if ($request->status === 'approved') {
                 if ($report->reportable_type === 'App\Models\Discussion') {
-                    $report->reportable->delete();
+                    $reportable->delete();
                 } elseif ($report->reportable_type === 'App\Models\Reply') {
-                    $report->reportable->delete();
+                    $reportable->delete();
                 } elseif ($report->reportable_type === 'App\Models\User') {
-                    $report->reportable->update(['status' => 'banned']);
+                    $reportable->update(['status' => 'banned']);
+                }
+            }
+
+            // Считаем общее число жалоб на этот объект
+            $totalReports = Report::where('reportable_type', $report->reportable_type)
+                ->where('reportable_id', $report->reportable_id)
+                ->where('status', 'pending')
+                ->count();
+
+            // Если жалоб больше 5 — блокируем автора на N дней
+            $threshold = 5;
+            $banDays = 7;
+
+            if ($totalReports >= $threshold) {
+                $author = null;
+
+                if ($report->reportable_type === 'App\Models\Reply') {
+                    $author = $reportable->user;
+                } elseif ($report->reportable_type === 'App\Models\Discussion') {
+                    $author = $reportable->user;
+                }
+
+                if ($author) {
+                    $author->update([
+                        'blocked_until' => now()->addDays($banDays),
+                        'is_blocked' => true,
+                    ]);
+
+                    Log::info("Пользователь заблокирован за {$totalReports} жалоб", [
+                        'user_id' => $author->id,
+                        'blocked_until' => now()->addDays($banDays),
+                    ]);
                 }
             }
 
@@ -97,6 +145,7 @@ class ReportController extends Controller
             ]);
 
             return response()->json(['message' => 'Жалоба обработана']);
+
         } catch (\Illuminate\Validation\ValidationException $e) {
             Log::error('Ошибка валидации при модерации жалобы', ['errors' => $e->errors()]);
             return response()->json(['message' => 'Ошибка валидации', 'errors' => $e->errors()], 422);
@@ -109,6 +158,7 @@ class ReportController extends Controller
             return response()->json(['message' => 'Ошибка модерации жалобы: ' . $e->getMessage()], 500);
         }
     }
+
 
     public function store(Request $request)
     {
@@ -155,4 +205,31 @@ class ReportController extends Controller
         }
     }
 
+    public function myResponseReports(Request $request)
+    {
+        $user = Auth::user();
+
+        $reports = Report::where('reportable_type', 'App\Models\Reply')
+            ->whereHas('reportable', function ($query) use ($user) {
+                $query->where('user_id', $user->id);
+            })
+            ->where('status', 'pending') // ← Показываем только нерассмотренные
+            ->with([
+                'reporter:id,name',
+                'reportable:id,discussion_id,user_id,content'
+            ])
+            ->latest()
+            ->paginate(10);
+
+        return response()->json([
+            'success' => true,
+            'data' => $reports->items(),
+            'pagination' => [
+                'current_page' => $reports->currentPage(),
+                'per_page' => $reports->perPage(),
+                'total' => $reports->total(),
+                'has_more_pages' => $reports->hasMorePages(),
+            ]
+        ]);
+    }
 }

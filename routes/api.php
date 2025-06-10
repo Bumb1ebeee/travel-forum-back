@@ -65,6 +65,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/reports/{reportId}/moderate', [ReportController::class, 'moderate']);
     Route::post('/reports', [ReportController::class, 'store']);
 
+
     Route::get('/subscriptions/users', [SubscriptionController::class, 'userSubscriptions']);
     Route::get('/subscriptions/discussions', [SubscriptionController::class, 'discussionSubscriptions']);
     Route::post('/subscriptions/{userId}', [SubscriptionController::class, 'subscribe']);
@@ -78,6 +79,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/reactions', [ReactionController::class, 'show']);
     Route::delete('/reactions', [ReactionController::class, 'destroy']);
     Route::get('/discussions/{id}/likes', [DiscussionController::class, 'likes']);
+
+    Route::get('/users/me/response-reports', [ReportController::class, 'myResponseReports']);
 
     Route::middleware('role:moderator')->group(function () {
         Route::get('/pending-discussions', [DiscussionController::class, 'pendingDiscussions']);

@@ -132,54 +132,249 @@ class DiscussionController extends Controller
     public function getUserPublished()
     {
         try {
+            if (!Auth::check()) {
+                return response()->json(['message' => 'Требуется авторизация'], 401);
+            }
+
             $published = Discussion::where('user_id', Auth::id())
                 ->where('status', 'approved')->where('is_draft', false)
-                ->with(['category', 'tags'])
+                ->with(['category',
+                    'tags',
+                    'media.content' => function ($query) {
+                        $query->select('id', 'media_id', 'file_id', 'content_type', 'order', 'image_url', 'video_url', 'music_url', 'text_content', 'map_points');
+                    }])
                 ->get();
-            return response()->json(['discussions' => $published]);
+
+            // Форматируем медиа для совместимости
+            $formattedDrafts = $published->map(function ($publish) {
+                $formattedMedia = $publish->media->map(function ($item) {
+                    $content = $item->content;
+                    Log::debug('Форматирование медиа в getUserDrafts', [
+                        'media_id' => $item->id,
+                        'content_exists' => !empty($content),
+                        'content_type' => $content ? $content->content_type : $item->type,
+                    ]);
+
+                    if (!$content) {
+                        Log::warning('Связь content отсутствует для медиа', [
+                            'media_id' => $item->id,
+                            'type' => $item->type,
+                        ]);
+                    }
+
+                    return [
+                        'id' => $item->id,
+                        'file_type' => $item->file_type,
+                        'type' => $item->type,
+                        'content_type' => $content ? $content->content_type : $item->type,
+                        'content' => $content ? [
+                            'file_id' => $content->file_id ?? $item->id,
+                            'content_type' => $content->content_type,
+                            'order' => $content->order,
+                            'image_url' => $content->image_url,
+                            'video_url' => $content->video_url,
+                            'music_url' => $content->music_url,
+                            'text_content' => $content->text_content,
+                            'map_points' => $content->map_points,
+                        ] : [
+                            'file_id' => $item->id,
+                            'content_type' => $item->type,
+                            'order' => 0,
+                            'image_url' => $item->type === 'image' ? 'https://placehold.co/80x80' : null,
+                            'video_url' => null,
+                            'music_url' => null,
+                            'text_content' => $item->type === 'text' ? '' : null,
+                            'map_points' => $item->type === 'map' ? [] : null,
+                        ],
+                    ];
+                });
+
+                $publishArray = $publish->toArray();
+                $publishArray['media'] = $formattedMedia;
+
+                return $publishArray;
+            });
+
+            Log::info('Черновики успешно получены', [
+                'user_id' => Auth::id(),
+                'draft_count' => $published->count(),
+                'media_count' => $published->sum(fn($publish) => $publish->media->count()),
+            ]);
+
+            return response()->json(['discussions' => $formattedDrafts], 200);
         } catch (\Exception $e) {
-            Log::error('Ошибка получения опубликованных обсуждений', [
+            Log::error('Ошибка получения черновиков', [
                 'error' => $e->getMessage(),
                 'user_id' => Auth::id(),
                 'trace' => $e->getTraceAsString()
             ]);
-            return response()->json(['message' => 'Ошибка получения опубликованных обсуждений'], 500);
+            return response()->json(['message' => 'Ошибка получения черновиков'], 500);
         }
     }
 
     public function getUserPending()
     {
         try {
-            $pending = Discussion::where('user_id', Auth::id())
+            if (!Auth::check()) {
+                return response()->json(['message' => 'Требуется авторизация'], 401);
+            }
+
+            $pendings = Discussion::where('user_id', Auth::id())
                 ->where('status', 'pending')->where('is_draft', false)
-                ->with(['category', 'tags'])
+                ->with(['category',
+                    'tags',
+                    'media.content' => function ($query) {
+                        $query->select('id', 'media_id', 'file_id', 'content_type', 'order', 'image_url', 'video_url', 'music_url', 'text_content', 'map_points');
+                    }])
                 ->get();
-            return response()->json(['discussions' => $pending]);
+
+            // Форматируем медиа для совместимости
+            $formattedDrafts = $pendings->map(function ($pending) {
+                $formattedMedia = $pending->media->map(function ($item) {
+                    $content = $item->content;
+                    Log::debug('Форматирование медиа в getUserDrafts', [
+                        'media_id' => $item->id,
+                        'content_exists' => !empty($content),
+                        'content_type' => $content ? $content->content_type : $item->type,
+                    ]);
+
+                    if (!$content) {
+                        Log::warning('Связь content отсутствует для медиа', [
+                            'media_id' => $item->id,
+                            'type' => $item->type,
+                        ]);
+                    }
+
+                    return [
+                        'id' => $item->id,
+                        'file_type' => $item->file_type,
+                        'type' => $item->type,
+                        'content_type' => $content ? $content->content_type : $item->type,
+                        'content' => $content ? [
+                            'file_id' => $content->file_id ?? $item->id,
+                            'content_type' => $content->content_type,
+                            'order' => $content->order,
+                            'image_url' => $content->image_url,
+                            'video_url' => $content->video_url,
+                            'music_url' => $content->music_url,
+                            'text_content' => $content->text_content,
+                            'map_points' => $content->map_points,
+                        ] : [
+                            'file_id' => $item->id,
+                            'content_type' => $item->type,
+                            'order' => 0,
+                            'image_url' => $item->type === 'image' ? 'https://placehold.co/80x80' : null,
+                            'video_url' => null,
+                            'music_url' => null,
+                            'text_content' => $item->type === 'text' ? '' : null,
+                            'map_points' => $item->type === 'map' ? [] : null,
+                        ],
+                    ];
+                });
+
+                $pendingArray = $pending->toArray();
+                $pendingArray['media'] = $formattedMedia;
+
+                return $pendingArray;
+            });
+
+            Log::info('Черновики успешно получены', [
+                'user_id' => Auth::id(),
+                'draft_count' => $pendings->count(),
+                'media_count' => $pendings->sum(fn($pending) => $pending->media->count()),
+            ]);
+
+            return response()->json(['discussions' => $formattedDrafts], 200);
         } catch (\Exception $e) {
-            Log::error('Ошибка получения ожидающих обсуждений', [
+            Log::error('Ошибка получения черновиков', [
                 'error' => $e->getMessage(),
                 'user_id' => Auth::id(),
                 'trace' => $e->getTraceAsString()
             ]);
-            return response()->json(['message' => 'Ошибка получения ожидающих обсуждений'], 500);
+            return response()->json(['message' => 'Ошибка получения черновиков'], 500);
         }
     }
 
     public function getUserRejected()
     {
         try {
+            if (!Auth::check()) {
+                return response()->json(['message' => 'Требуется авторизация'], 401);
+            }
+
             $rejected = Discussion::where('user_id', Auth::id())
                 ->where('status', 'rejected')->where('is_draft', false)
-                ->with(['category', 'tags'])
+                ->with(['category',
+                    'tags',
+                    'media.content' => function ($query) {
+                        $query->select('id', 'media_id', 'file_id', 'content_type', 'order', 'image_url', 'video_url', 'music_url', 'text_content', 'map_points');
+                    }])
                 ->get();
-            return response()->json(['discussions' => $rejected]);
+
+            // Форматируем медиа для совместимости
+            $formattedDrafts = $rejected->map(function ($reject) {
+                $formattedMedia = $reject->media->map(function ($item) {
+                    $content = $item->content;
+                    Log::debug('Форматирование медиа в getUserDrafts', [
+                        'media_id' => $item->id,
+                        'content_exists' => !empty($content),
+                        'content_type' => $content ? $content->content_type : $item->type,
+                    ]);
+
+                    if (!$content) {
+                        Log::warning('Связь content отсутствует для медиа', [
+                            'media_id' => $item->id,
+                            'type' => $item->type,
+                        ]);
+                    }
+
+                    return [
+                        'id' => $item->id,
+                        'file_type' => $item->file_type,
+                        'type' => $item->type,
+                        'content_type' => $content ? $content->content_type : $item->type,
+                        'content' => $content ? [
+                            'file_id' => $content->file_id ?? $item->id,
+                            'content_type' => $content->content_type,
+                            'order' => $content->order,
+                            'image_url' => $content->image_url,
+                            'video_url' => $content->video_url,
+                            'music_url' => $content->music_url,
+                            'text_content' => $content->text_content,
+                            'map_points' => $content->map_points,
+                        ] : [
+                            'file_id' => $item->id,
+                            'content_type' => $item->type,
+                            'order' => 0,
+                            'image_url' => $item->type === 'image' ? 'https://placehold.co/80x80' : null,
+                            'video_url' => null,
+                            'music_url' => null,
+                            'text_content' => $item->type === 'text' ? '' : null,
+                            'map_points' => $item->type === 'map' ? [] : null,
+                        ],
+                    ];
+                });
+
+                $rejectArray = $reject->toArray();
+                $rejectArray['media'] = $formattedMedia;
+
+                return $rejectArray;
+            });
+
+            Log::info('Черновики успешно получены', [
+                'user_id' => Auth::id(),
+                'draft_count' => $rejected->count(),
+                'media_count' => $rejected->sum(fn($reject) => $reject->media->count()),
+            ]);
+
+            return response()->json(['discussions' => $formattedDrafts], 200);
         } catch (\Exception $e) {
-            Log::error('Ошибка получения отклонённых обсуждений', [
+            Log::error('Ошибка получения черновиков', [
                 'error' => $e->getMessage(),
                 'user_id' => Auth::id(),
                 'trace' => $e->getTraceAsString()
             ]);
-            return response()->json(['message' => 'Ошибка получения отклонённых обсуждений'], 500);
+            return response()->json(['message' => 'Ошибка получения черновиков'], 500);
         }
     }
 
