@@ -34,7 +34,7 @@ class PopularController extends Controller
         if ($user) {
             SearchQuery::create([
                 'user_id' => $user->id,
-                'query' => $request->input('query'), // Исправлено: $request->query -> $request->input('query')
+                'query' => $request->input('query'),
             ]);
         }
 
@@ -63,44 +63,100 @@ class PopularController extends Controller
         return response()->json(['discussions' => $discussions], 200);
     }
 
-    // Популярные обсуждения (для неавторизованных)
     public function popularDiscussions(Request $request)
     {
         $categoryId = $request->query('category_id');
+        $page = $request->query('page', 1);
+        $perPage = 10;
 
-        $query = Discussion::with(['user', 'category', 'media', 'tags'])->where('status', 'approved')
-            ->orderBy('views', 'desc')
-            ->limit(20);
+        // Fetch discussions
+        $query = Discussion::with(['user', 'category', 'media', 'tags'])
+            ->where('status', 'approved')
+            ->orderBy('views', 'desc');
 
         if ($categoryId) {
             $query->where('category_id', $categoryId);
         }
 
-        $discussions = $query->get();
+        $discussions = $query->paginate($perPage, ['*'], 'page', $page);
 
-        return response()->json(['discussions' => $discussions]);
+        // Fetch 2 popular tags
+        $tags = Tag::withCount('discussions')
+            ->orderBy('discussions_count', 'desc')
+            ->take(2)
+            ->get(['id', 'name', 'discussions_count']);
+
+        return response()->json([
+            'discussions' => $discussions->items(),
+            'pagination' => [
+                'current_page' => $discussions->currentPage(),
+                'last_page' => $discussions->lastPage(),
+                'total' => $discussions->total(),
+                'per_page' => $discussions->perPage(),
+            ],
+            'tags' => $tags,
+        ]);
     }
 
     public function getPersonalizedDiscussions(Request $request)
     {
         $categoryId = $request->query('category_id');
+        $page = $request->query('page', 1);
+        $perPage = 10;
+        $user = $request->user();
 
-        $query = Discussion::with(['user', 'category', 'media', 'tags'])->where('status', 'approved')
-            ->orderBy('views', 'desc')
-            ->limit(20);
+        $query = Discussion::with(['user', 'category', 'media', 'tags'])
+            ->where('status', 'approved');
+
+        if ($user) {
+            // Get tags from user's viewed discussions
+            $viewedTags = \DB::table('views')
+                ->join('discussion_tag', 'views.discussion_id', '=', 'discussion_tag.discussion_id')
+                ->join('tags', 'discussion_tag.tag_id', '=', 'tags.id')
+                ->where('views.user_id', $user->id)
+                ->pluck('tags.id')
+                ->unique();
+
+            // Prioritize discussions with those tags
+            $query->whereHas('tags', function ($q) use ($viewedTags) {
+                $q->whereIn('tags.id', $viewedTags);
+            })->orWhereDoesntHave('tags'); // Fallback to discussions without tags
+        } else {
+            // Fallback to popular discussions if no user
+            $query->orderBy('views', 'desc');
+        }
 
         if ($categoryId) {
             $query->where('category_id', $categoryId);
         }
 
-        $discussions = $query->get();
-        return response()->json(['discussions' => $discussions]);
+        $discussions = $query->orderBy('views', 'desc')->paginate($perPage, ['*'], 'page', $page);
+
+        // Fetch 2 popular tags
+        $tags = Tag::withCount('discussions')
+            ->orderBy('discussions_count', 'desc')
+            ->take(2)
+            ->get(['id', 'name', 'discussions_count']);
+
+        return response()->json([
+            'discussions' => $discussions->items(),
+            'pagination' => [
+                'current_page' => $discussions->currentPage(),
+                'last_page' => $discussions->lastPage(),
+                'total' => $discussions->total(),
+                'per_page' => $discussions->perPage(),
+            ],
+            'tags' => $tags,
+        ]);
     }
 
     public function discussionsByTag($tagName)
     {
         $tag = Tag::where('name', $tagName)->firstOrFail();
-        $discussions = $tag->discussions()->where('status', 'approved')->with(['user', 'media', 'tags'])->latest()->get();
+        $discussions = $tag->discussions()->where('status', 'approved')
+            ->with(['user', 'category', 'media', 'tags'])
+            ->latest()
+            ->get();
         return response()->json(['discussions' => $discussions], 200);
     }
 

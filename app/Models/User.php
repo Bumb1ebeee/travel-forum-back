@@ -50,7 +50,9 @@ class User extends Authenticatable
 
     public function subscriptions()
     {
-        return $this->hasMany(Subscription::class, 'subscriber_id');
+        return $this->belongsToMany(User::class, 'subscriptions', 'subscriber_id', 'user_id')
+            ->withTimestamps()
+            ->withPivot('id'); // ✅ Теперь withPivot() доступен
     }
 
     // Пользователи, которые подписаны на текущего пользователя
@@ -94,6 +96,25 @@ class User extends Authenticatable
     public function reported()
     {
         return $this->hasMany(Report::class, 'reporter_id');
+    }
+
+    public function processedReports()
+    {
+        return $this->hasMany(Report::class, 'moderator_id')
+            ->whereIn('status', ['approved', 'rejected'])
+            ->where('updated_at', '>=', now()->subDays(30));
+    }
+
+    public function reviewedDiscussions()
+    {
+        return $this->hasMany(Discussion::class, 'moderator_id')
+            ->whereIn('status', ['approved', 'rejected'])
+            ->where('is_draft', false);
+    }
+
+    public function reviewedReplies()
+    {
+        return $this->hasMany(Reply::class, 'moderator_id');
     }
 
 

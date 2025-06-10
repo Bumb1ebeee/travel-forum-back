@@ -72,15 +72,25 @@ class SubscriptionController extends Controller
             return response()->json(['message' => 'Требуется авторизация'], 401);
         }
 
-        $subscriptions = $user->subscriptions()
-            ->get()
-            ->map(function ($followedUser) {
-                return [
-                    'id' => $followedUser->pivot ? $followedUser->pivot->id : null,
-                    'type' => 'user',
-                    'user' => $followedUser,
-                ];
-            });
+        // Загружаем подписки с пользователем
+        $followedUsers = $user->subscriptions()
+            ->withPivot('id') // ✅ Теперь доступно
+            ->get();
+
+        $subscriptions = $followedUsers->map(function ($followedUser) {
+            return [
+                'id' => $followedUser->pivot->id,
+                'type' => 'user',
+                'user' => [
+                    'id' => $followedUser->id,
+                    'name' => $followedUser->name,
+                    'email' => $followedUser->email,
+                    'avatar' => $followedUser->avatar ?? null,
+                    'created_at' => $followedUser->created_at,
+                    'updated_at' => $followedUser->updated_at,
+                ],
+            ];
+        });
 
         return response()->json([
             'subscriptions' => $subscriptions,

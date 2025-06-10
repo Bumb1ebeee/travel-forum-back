@@ -224,4 +224,23 @@ class StatisticsController extends Controller
 
         return response()->json([]);
     }
+
+    public function getModerators(Request $request)
+    {
+        $moderators = User::where('role', 'moderator')->with([
+            'processedReports',
+            'reviewedDiscussions',
+            'reviewedReplies'
+        ])->get();
+
+        return response()->json($moderators->map(function ($mod) {
+            return [
+                'id' => $mod->id,
+                'username' => $mod->username,
+                'processed_reports' => $mod->processedReports->count(),
+                'reviewed_discussions' => $mod->reviewedDiscussions->count(),
+                'reviewed_replies' => $mod->reviewedReplies->count()
+            ];
+        }));
+    }
 }

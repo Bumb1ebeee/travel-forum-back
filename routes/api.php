@@ -88,7 +88,7 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/staff', [StaffController::class, 'index']);
         Route::post('/staff', [StaffController::class, 'store']);
         Route::delete('/staff/{userId}', [StaffController::class, 'destroy']);
-
+        Route::get('/statistics/moderators', [StatisticsController::class, 'getModerators']);
         Route::post('/tests', [TestController::class, 'store']);
     });
     Route::get('/tests', [TestController::class, 'index']);

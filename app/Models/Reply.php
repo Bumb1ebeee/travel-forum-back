@@ -57,4 +57,9 @@ class Reply extends Model
     {
         return $this->reactions()->where('reaction', 'like')->count();
     }
+
+    public function moderator()
+    {
+        return $this->belongsTo(User::class, 'moderator_id');
+    }
 }
