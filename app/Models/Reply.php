@@ -40,7 +40,7 @@ class Reply extends Model
 
     public function discussion()
     {
-        return $this->belongsTo(Discussion::class);
+        return $this->belongsTo(Discussion::class, 'discussion_id');
     }
 
     public function reactions()

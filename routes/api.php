@@ -25,7 +25,7 @@ Route::get('/test', function () {
     return response()->json(['message' => 'API работает']);
 });
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'blocked'])->group(function () {
     Route::get('/check-token', [AuthController::class, 'checkToken']);
     Route::post('/update-avatar', [UserController::class, 'updateAvatar']);
     Route::get('/user', [AuthController::class, 'user']);
@@ -82,9 +82,12 @@ Route::middleware('auth:sanctum')->group(function () {
 
     Route::get('/users/me/response-reports', [ReportController::class, 'myResponseReports']);
 
+
+
     Route::middleware('role:moderator')->group(function () {
         Route::get('/pending-discussions', [DiscussionController::class, 'pendingDiscussions']);
         Route::post('/discussions/{id}/moderate', [DiscussionController::class, 'moderate']);
+        Route::post('/reports/group', [ReportController::class, 'moderateGroup']);
     });
 
     Route::middleware( 'role:admin')->group(function () {
@@ -93,6 +96,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::delete('/staff/{userId}', [StaffController::class, 'destroy']);
         Route::get('/statistics/moderators', [StatisticsController::class, 'getModerators']);
         Route::post('/tests', [TestController::class, 'store']);
+        Route::get('/users', [UserController::class, 'index']);
+        Route::post('/users/{id}/block', [UserController::class, 'block']);
+        Route::post('/users/{id}/unblock', [UserController::class, 'unblock']);
+        Route::post('/staff/assign', [StaffController::class, 'assign']); // Назначить модератора
     });
     Route::get('/tests', [TestController::class, 'index']);
     Route::get('/tests/{test}', [TestController::class, 'show']);
@@ -108,7 +115,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/statistics/recent-actions', [StatisticsController::class, 'recentActions'])->name('statistics.recent-actions');
 });
 
-Route::middleware('auth:sanctum')->group(function () {
+Route::middleware(['auth:sanctum', 'blocked'])->group(function () {
     Route::get('/2fa/setup', [AuthController::class, 'setup2FA']);
     Route::post('/2fa/enable', [AuthController::class, 'enable2FA']);
     Route::post('/2fa/disable', [AuthController::class, 'disable2FA']);
@@ -131,3 +138,12 @@ Route::post('/discussions/{id}/join', [DiscussionController::class, 'join'])->mi
 Route::post('/discussions/{id}/replies', [ReplyController::class, 'addReply'])->middleware('auth:sanctum');
 Route::get('/users/{id}', [SubscriptionController::class, 'show']);
 Route::get('/users/{id}/discussions', [SubscriptionController::class, 'userDiscussions']);
+
+Route::get('/discussions/{id}/subscribers', [DiscussionController::class, 'getSubscribers']);
+
+Route::get('/media/{mediaId}/refresh', [MediaController::class, 'getDirectUrl']);
+Route::post('/media/{mediaId}/refresh', [MediaController::class, 'refreshUrl']);
+
+
+Route::get('/reply/{replyId}/refresh', [ReplyController::class, 'getDirectUrl']);
+Route::post('/reply/{replyId}/refresh', [ReplyController::class, 'refreshUrl']);

@@ -24,9 +24,9 @@ return new class extends Migration
             $table->foreignId('media_id')->constrained()->onDelete('cascade');
             $table->string('content_type')->index(); // Тип контента: text, image, video, music, map
             $table->text('text_content')->nullable(); // Для текста
-            $table->string('image_url')->nullable(); // Для изображения
-            $table->string('video_url')->nullable(); // Для видео
-            $table->string('music_url')->nullable(); // Для музыки
+            $table->text('image_url')->nullable(); // Для изображения
+            $table->text('video_url')->nullable(); // Для видео
+            $table->text('music_url')->nullable(); // Для музыки
             $table->json('map_points')->nullable(); // Для карты (массив координат)
             $table->unsignedInteger('order')->default(0); // Порядок отображения
             $table->timestamps();

@@ -20,6 +20,7 @@ class MediaContent extends Model
         'music_url',
         'map_points',
         'file_id',
+        'file_path',
         'order',
     ];
 

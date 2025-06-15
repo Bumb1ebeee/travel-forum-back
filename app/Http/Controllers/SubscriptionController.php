@@ -99,7 +99,7 @@ class SubscriptionController extends Controller
 
     public function show($id)
     {
-        $user = User::find($id);
+        $user = User::findOrFail($id);
         if (!$user) {
             return response()->json(['message' => 'Пользователь не найден'], 404);
         }

@@ -627,88 +627,89 @@ class DiscussionController extends Controller
         }
     }
 
-    public function show($id)
-    {
-        try {
-            $discussion = Discussion::with([
-                'user',
-                'category',
-                'media.content',
-                'reactions'
-            ])
-                ->where('status', 'approved')
-                ->findOrFail($id);
-            $discussion->increment('views');
 
-            $replies = Reply::with([
-                'user',
-                'reactions',
-                'media.content', // Обязательно
-                'children' => function ($query) {
-                    $this->loadNestedChildren($query);
-                }
-            ])
-                ->where('discussion_id', $id)
-                ->whereNull('parent_id')
-                ->orderBy('created_at', 'asc')
-                ->get();
+public function show($id)
+{
+    try {
+        $discussion = Discussion::with([
+            'user',
+            'category',
+            'media.content',
+            'reactions'
+        ])
+            ->where('status', 'approved')
+            ->findOrFail($id);
+        $discussion->increment('views');
 
-            $user = Auth::guard('sanctum')->user();
-            $userId = $user ? $user->id : null;
-
-            // Записываем просмотр, если пользователь авторизован
-            if ($userId) {
-                DiscussionView::firstOrCreate([
-                    'user_id' => $userId,
-                    'discussion_id' => $id,
-                ]);
-            }
-
-            $replies->each(function ($reply) use ($userId) {
-                $reply->likes = $reply->reactions->where('reaction', 'like')->count() - $reply->reactions->where('reaction', 'dislike')->count();
-                $reply->userReaction = $userId ? $reply->reactions->where('user_id', $userId)->first()?->reaction : null;
-                unset($reply->reactions);
-                $this->calculateLikesForChildren($reply->children, $userId);
-            });
-
-            $isJoined = $user ? $discussion->members()->where('user_id', $user->id)->exists() : false;
-            Log::info('Обсуждение просмотрено', ['discussion_id' => $id, 'user_id' => $userId ?? 'гость', 'isJoined' => $isJoined]);
-
-            return response()->json([
-                'discussion' => $discussion,
-                'replies' => $replies,
-                'isJoined' => $isJoined,
-            ]);
-        } catch (\Exception $e) {
-            Log::error('Ошибка загрузки обсуждения', ['discussion_id' => $id, 'error' => $e->getMessage()]);
-            return response()->json(['message' => 'Ошибка при загрузке обсуждения'], 500);
-        }
-    }
-
-    private function loadNestedChildren($query)
-    {
-        $query->with([
+        $replies = Reply::with([
             'user',
             'reactions',
-            'parent.user',
-            'media.content', // Обязательно для вложенных ответов
-            'children' => function ($childQuery) {
-                $this->loadNestedChildren($childQuery);
+            'media.content',
+            'children' => function ($query) {
+                $this->loadNestedChildren($query);
             }
-        ]);
-    }
+        ])
+            ->where('discussion_id', $id)
+            ->whereNull('parent_id')
+            ->orderBy('created_at', 'desc') // Changed from 'asc' to 'desc'
+            ->get();
 
-    private function calculateLikesForChildren($children, $userId)
-    {
-        $children->each(function ($reply) use ($userId) {
+        $user = Auth::guard('sanctum')->user();
+        $userId = $user ? $user->id : null;
+
+        // Записываем просмотр, если пользователь авторизован
+        if ($userId) {
+            DiscussionView::firstOrCreate([
+                'user_id' => $userId,
+                'discussion_id' => $id,
+            ]);
+        }
+
+        $replies->each(function ($reply) use ($userId) {
             $reply->likes = $reply->reactions->where('reaction', 'like')->count() - $reply->reactions->where('reaction', 'dislike')->count();
             $reply->userReaction = $userId ? $reply->reactions->where('user_id', $userId)->first()?->reaction : null;
             unset($reply->reactions);
-            if ($reply->children->isNotEmpty()) {
-                $this->calculateLikesForChildren($reply->children, $userId);
-            }
+            $this->calculateLikesForChildren($reply->children, $userId);
         });
+
+        $isJoined = $user ? $discussion->members()->where('user_id', $user->id)->exists() : false;
+        Log::info('Обсуждение просмотрено', ['discussion_id' => $id, 'user_id' => $userId ?? 'гость', 'isJoined' => $isJoined]);
+
+        return response()->json([
+            'discussion' => $discussion,
+            'replies' => $replies,
+            'isJoined' => $isJoined,
+        ]);
+    } catch (\Exception $e) {
+        Log::error('Ошибка загрузки обсуждения', ['discussion_id' => $id, 'error' => $e->getMessage()]);
+        return response()->json(['message' => 'Ошибка при загрузке обсуждения'], 500);
     }
+}
+
+private function loadNestedChildren($query)
+{
+    $query->with([
+        'user',
+        'reactions',
+        'media.content',
+        'children' => function ($query) {
+            $this->loadNestedChildren($query);
+        }
+    ])->orderBy('created_at', 'desc'); // Ensure nested replies are also ordered by newest first
+}
+
+private function calculateLikesForChildren($children, $userId)
+{
+    $children->each(function ($reply) use ($userId) {
+        $reply->likes = $reply->reactions->where('reaction', 'like')->count() - $reply->reactions->where('reaction', 'dislike')->count();
+        $reply->userReaction = $userId ? $reply->reactions->where('user_id', $userId)->first()?->reaction : null;
+        unset($reply->reactions);
+        if ($reply->children) {
+            $this->calculateLikesForChildren($reply->children, $userId);
+        }
+    });
+}
+
 
     public function uploadImage(Request $request)
     {
@@ -791,9 +792,17 @@ class DiscussionController extends Controller
     public function join($id)
     {
         try {
+            $user = Auth::guard('sanctum')->user();
+            if (!$user) {
+                return response()->json(['message' => 'Unauthorized'], 401);
+            }
+
             $discussion = Discussion::where('status', 'approved')->findOrFail($id);
-            $userId = Auth::id();
-            $discussion->members()->syncWithoutDetaching([$userId => ['created_at' => now(), 'updated_at' => now()]]);
+            if ($discussion->user_id === $user->id) {
+                return response()->json(['message' => 'Вы являетесь автором и не можете присоединиться'], 403);
+            }
+
+            $discussion->members()->syncWithoutDetaching([$user->id => ['created_at' => now(), 'updated_at' => now()]]);
             return response()->json(['success' => true, 'isJoined' => true]);
         } catch (\Exception $e) {
             Log::error('Error joining discussion', ['discussion_id' => $id, 'error' => $e->getMessage()]);
@@ -1162,27 +1171,14 @@ class DiscussionController extends Controller
                 return response()->json(['message' => 'Discussion not found or not accessible'], 404);
             }
 
-            $validated = $request->validate([
-                'title' => 'required|string|max:255',
-                'category_id' => 'required|exists:categories,id',
-                'description' => 'nullable|string',
-                'map' => 'nullable|array|max:10', // Максимум 10 точек
-                'map.*.lat' => 'nullable|numeric|between:-90,90', // Широта
-                'map.*.lng' => 'nullable|numeric|between:-180,180', // Долгота
-            ]);
-
+            // Удаляем валидацию, так как данные не меняются
             Log::info('Before update', [
                 'discussion_id' => $id,
                 'is_draft' => $discussion->is_draft,
                 'published_at' => $discussion->published_at,
-                'validated_data' => $validated,
             ]);
 
             $updated = $discussion->update([
-                'title' => $validated['title'],
-                'category_id' => $validated['category_id'],
-                'description' => $validated['description'],
-                'map' => $validated['map'] ?? [], // Сохраняем как массив координат
                 'is_draft' => false,
                 'published_at' => now(),
                 'status' => 'pending',
@@ -1204,9 +1200,6 @@ class DiscussionController extends Controller
             }
 
             return response()->json(['message' => 'Обсуждение опубликовано', 'discussion' => $discussion]);
-        } catch (\Illuminate\Validation\ValidationException $e) {
-            Log::error('Validation error publishing discussion', ['errors' => $e->errors()]);
-            return response()->json(['message' => 'Validation error', 'errors' => $e->errors()], 422);
         } catch (\Exception $e) {
             Log::error('Error publishing discussion', ['error' => $e->getMessage(), 'trace' => $e->getTraceAsString()]);
             return response()->json(['message' => 'Error publishing discussion'], 500);
@@ -1241,5 +1234,18 @@ class DiscussionController extends Controller
             ]);
             return response()->json(['message' => 'Error fetching likes'], 500);
         }
+    }
+
+    public function getSubscribers($id)
+    {
+        $discussion = Discussion::find($id);
+
+        if (!$discussion) {
+            return response()->json(['count' => 0], 200);
+        }
+
+        $count = $discussion->members()->count();
+
+        return response()->json(['count' => $count], 200);
     }
 }

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use PragmaRX\Google2FA\Google2FA;
 use BaconQrCode\Renderer\ImageRenderer;
@@ -54,16 +55,42 @@ class AuthController extends Controller
         $user = User::where($field, $request->login)->first();
 
         if (!$user || !Hash::check($request->password, $user->password)) {
-            \Log::info('Неверные учетные данные для:', ['login' => $request->login]);
             throw ValidationException::withMessages([
                 'login' => ['Неверные учетные данные'],
             ]);
         }
 
-        // Если 2FA включена, возвращаем флаг без токена
+        \Log::info($user->is_blocked);
+
+        // Проверяем, не заблокирован ли пользователь
+        if ($user->is_blocked) {
+            if ($user->blocked_until) {
+                $blockedUntil = \Carbon\Carbon::parse($user->blocked_until);
+
+                if (now()->lessThan($blockedUntil)) {
+                    throw ValidationException::withMessages([
+                        'login' => [
+                            "Ваш аккаунт временно заблокирован. Разблокировка: " .
+                            $blockedUntil->format('d.m.Y H:i')
+                        ]
+                    ]);
+                } else {
+                    // Разблокируем пользователя
+                    $user->update([
+                        'is_blocked' => false,
+                        'blocked_until' => null,
+                    ]);
+                }
+            } else {
+                // Если нет даты, но is_blocked == true
+                throw ValidationException::withMessages([
+                    'login' => ['Ваш аккаунт заблокирован']
+                ]);
+            }
+        }
+
+        // Если 2FA включена — отправляем session_id
         if ($user->two_factor_enabled) {
-            \Log::info('2FA требуется для:', ['user_id' => $user->id]);
-            // Генерируем временный идентификатор сессии
             $sessionId = Str::random(40);
             cache()->put('2fa:session:' . $sessionId, $user->id, now()->addMinutes(10));
             return response()->json([
@@ -72,9 +99,8 @@ class AuthController extends Controller
             ]);
         }
 
-        // Если 2FA не включена, выдаём токен
+        // Создаём токен и возвращаем
         $token = $user->createToken('auth_token')->plainTextToken;
-        \Log::info('Успешный вход без 2FA для:', ['user_id' => $user->id]);
         return response()->json(['token' => $token]);
     }
 

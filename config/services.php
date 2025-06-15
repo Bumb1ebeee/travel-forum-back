@@ -37,4 +37,8 @@ return [
         'url_endpoint' => env('IMAGEKIT_URL_ENDPOINT'),
     ],
 
+    'yandex_disk' => [
+        'token' => env('YANDEX_DISK_TOKEN'),
+    ],
+
 ];

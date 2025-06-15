@@ -24,6 +24,7 @@ class User extends Authenticatable
         'role',
         'password',
         'avatar',
+        'is_blocked',
         'two_factor_secret',
         'two_factor_enabled'
     ];

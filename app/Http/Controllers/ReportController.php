@@ -14,47 +14,96 @@ class ReportController extends Controller
         try {
             $type = $request->query('type');
             $validTypes = ['discussions', 'users', 'replies'];
-
             if (!in_array($type, $validTypes)) {
                 return response()->json(['message' => 'Некорректный тип жалобы'], 400);
             }
 
-            // Маппинг типа на модель
             $typeMap = [
                 'discussions' => 'App\Models\Discussion',
                 'users' => 'App\Models\User',
                 'replies' => 'App\Models\Reply',
             ];
 
-            // Загружаем только жалобы со статусом 'pending'
-            $reports = Report::where('reportable_type', $typeMap[$type])
+            $groupedReports = Report::where('reportable_type', $typeMap[$type])
                 ->where('status', 'pending')
                 ->with([
                     'reporter:id,username',
-                    'reportable' => function ($query) use ($type) {
-                        if ($type === 'discussions') {
-                            $query->select('id', 'title', 'user_id', 'category_id')
-                                ->with(['user:id,username', 'category:id,name']);
-                        } elseif ($type === 'users') {
-                            $query->select('id', 'username', 'email');
-                        } elseif ($type === 'replies') {
-                            $query->select('id', 'content', 'user_id', 'discussion_id')
-                                ->with(['user:id,username', 'discussion:id,title']);
-                        }
-                    }
+                    'reportable'
                 ])
+                ->get()
+                ->groupBy(function ($item) {
+                    return $item->reportable_type . '|' . $item->reportable_id;
+                });
+
+            $formattedReports = [];
+
+            foreach ($groupedReports as $key => $reports) {
+                [$reportableType, $reportableId] = explode('|', $key);
+                $reports = $groupedReports[$key];
+                $reportable = $reports->first()->reportable;
+
+                $formattedReports[] = [
+                    'reportable_type' => $reportableType,
+                    'reportable_id' => $reportableId,
+                    'reportable' => $reportable,
+                    'total_reports' => $reports->count(),
+                    'reasons' => $reports->pluck('reason')->toArray(),
+                    'reporters' => $reports->map(function ($r) {
+                        return [
+                            'id' => $r->reporter->id,
+                            'username' => $r->reporter->username,
+                        ];
+                    }),
+                ];
+            }
+
+        return response()->json(['groups' => $formattedReports]);
+    } catch (\Exception $e) {
+            return response()->json(['message' => 'Ошибка получения жалоб: ' . $e->getMessage()], 500);
+        }
+    }
+
+    public function moderateGroup(Request $request)
+    {
+        try {
+            $request->validate([
+                'reportable_id' => 'required|integer',
+                'status' => 'required|in:approved,rejected',
+                'comment' => 'nullable|string|max:1000',
+            ]);
+
+            // Найдём все нерассмотренные жалобы на этот объект
+            $reports = Report::where('reportable_id', $request->reportable_id)
+                ->where('status', 'pending')
                 ->get();
 
-            Log::info('Жалобы получены', ['type' => $type, 'count' => $reports->count()]);
+            foreach ($reports as $report) {
+                $report->update([
+                    'status' => $request->status,
+                    'moderator_comment' => $request->comment,
+                    'moderator_id' => Auth::id(),
+                ]);
 
-            return response()->json(['reports' => $reports]);
+                // Удаление объекта, если жалобу одобрили
+                if ($request->status === 'approved') {
+                    $reportable = $report->reportable;
+                    if ($reportable) {
+                        if ($reportable instanceof \App\Models\User) {
+                            $reportable->update(['status' => 'banned']);
+                        } else {
+                            $reportable->delete();
+                        }
+                    }
+                }
+            }
+
+            return response()->json(['message' => 'Группа жалоб промодерирована']);
         } catch (\Exception $e) {
-            Log::error('Ошибка получения жалоб', [
+            Log::error('Ошибка групповой модерации', [
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-                'type' => $request->query('type'),
+                'data' => $request->all()
             ]);
-            return response()->json(['message' => 'Ошибка получения жалоб: ' . $e->getMessage()], 500);
+            return response()->json(['message' => 'Ошибка групповой модерации'], 500);
         }
     }
 
@@ -163,28 +212,27 @@ class ReportController extends Controller
     public function store(Request $request)
     {
         try {
-            // Проверка аутентификации
             if (!Auth::check()) {
-                Log::warning('Попытка создания отчета без аутентификации', [
-                    'request_data' => $request->all(),
-                ]);
                 return response()->json(['message' => 'Неавторизован'], 401);
             }
 
-            // Валидация входных данных
             $validated = $request->validate([
                 'reason' => 'required|string|max:255',
                 'reportable_id' => 'required|integer',
-                'reportable_type' => 'required|in:App\\Models\\Discussion,App\\Models\\Reply',
+                'reportable_type' => 'required|in:App\\Models\\Discussion,App\\Models\\Reply,App\\Models\\User',
             ]);
 
-            // Логирование входных данных для отладки
-            Log::info('Создание отчета', [
-                'user_id' => Auth::id(),
-                'validated_data' => $validated,
-            ]);
+            // Проверяем, нет ли уже существующей жалобы от этого пользователя на тот же объект
+            $existingReport = Report::where('reporter_id', Auth::id())
+                ->where('reportable_id', $validated['reportable_id'])
+                ->where('reportable_type', $validated['reportable_type'])
+                ->whereIn('status', ['pending', 'approved', 'rejected']) // можно ограничить только pending
+                ->exists();
 
-            // Создание отчета
+            if ($existingReport) {
+                return response()->json(['message' => 'Вы уже отправили жалобу на этот объект'], 400);
+            }
+
             $report = Report::create([
                 'reason' => $validated['reason'],
                 'reportable_id' => $validated['reportable_id'],
@@ -193,15 +241,14 @@ class ReportController extends Controller
                 'status' => 'pending',
             ]);
 
-            return response()->json(['report' => $report, 'message' => 'Отчет успешно отправлен'], 201);
+            return response()->json(['report' => $report, 'message' => 'Жалоба успешно отправлена'], 201);
         } catch (\Exception $e) {
-            Log::error('Ошибка создания отчета', [
+            Log::error('Ошибка создания жалобы', [
                 'error' => $e->getMessage(),
                 'user_id' => Auth::id(),
-                'request_data' => $request->all(),
-                'trace' => $e->getTraceAsString()
+                'request_data' => $request->all()
             ]);
-            return response()->json(['message' => 'Ошибка создания отчета: ' . $e->getMessage()], 500);
+            return response()->json(['message' => 'Ошибка при отправке жалобы'], 500);
         }
     }
 
@@ -209,17 +256,38 @@ class ReportController extends Controller
     {
         $user = Auth::user();
 
+        if (!$user) {
+            return response()->json(['message' => 'Unauthorized'], 401);
+        }
+
         $reports = Report::where('reportable_type', 'App\Models\Reply')
             ->whereHas('reportable', function ($query) use ($user) {
                 $query->where('user_id', $user->id);
             })
-            ->where('status', 'pending') // ← Показываем только нерассмотренные
+            ->where('status', 'pending')
             ->with([
-                'reporter:id,name',
-                'reportable:id,discussion_id,user_id,content'
+                'reporter' => function ($query) {
+                    $query->select('id', 'name');
+                },
+                'reportable' => function ($query) {
+                    $query->select('id', 'discussion_id', 'user_id', 'content')
+                        ->with(['discussion' => function ($subQuery) {
+                            $subQuery->select('id', 'title', 'user_id');
+                        }]);
+                }
             ])
             ->latest()
             ->paginate(10);
+
+        \Log::info('myResponseReports fetched', [
+            'user_id' => $user->id,
+            'report_count' => $reports->total(),
+            'first_report' => $reports->first() ? [
+                'reportable_type' => $reports->first()->reportable_type,
+                'reportable_id' => $reports->first()->reportable_id,
+                'discussion_id' => $reports->first()->reportable?->discussion_id,
+            ] : null,
+        ]);
 
         return response()->json([
             'success' => true,

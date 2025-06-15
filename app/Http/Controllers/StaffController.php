@@ -46,6 +46,21 @@ class StaffController extends Controller
         }
     }
 
+    public function assign(Request $request)
+    {
+        $request->validate([
+            'user_id' => 'required|integer|exists:users,id',
+        ]);
+
+        $user = User::findOrFail($request->input('user_id'));
+        $user->update(['role' => 'moderator']);
+
+        return response()->json([
+            'message' => 'Пользователь назначен модератором',
+            'user' => $user,
+        ]);
+    }
+
     public function destroy($userId)
     {
         try {
