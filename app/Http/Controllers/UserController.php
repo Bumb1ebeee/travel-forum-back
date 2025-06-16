@@ -3,17 +3,20 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
-use GuzzleHttp\Client;
-use GuzzleHttp\Exception\ClientException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\ValidationException;
+use Illuminate\Support\Str;
 use Intervention\Image\ImageManager;
 
 class UserController extends Controller
 {
+    private const BASE_PATH = 'avatars/';
+    private const CACHE_TTL_HOURS = 12; // Срок жизни кэша для ссылок
+
     public function update(Request $request)
     {
         $user = $request->user();
@@ -29,101 +32,69 @@ class UserController extends Controller
         return response()->json(['user' => $user], 200);
     }
 
-    private $yandexToken;
-
-    public function __construct()
-    {
-        $this->yandexToken = env('YANDEX_DISK_TOKEN');
-        if (!$this->yandexToken) {
-            \Log::error('Yandex Disk token не найден в .env');
-            throw new \Exception('Yandex Disk token не найден в .env');
-        }
-    }
-
     /**
-     * Загрузка файла на Яндекс.Диск и получение прямой ссылки
+     * Загрузка аватара через Yandex Cloud Storage
      */
-
-    private function uploadToYandexDisk($file)
-    {
-        $client = new Client();
-        $fileName = uniqid() . '_' . $file->getClientOriginalName();
-        $filePath = "/avatars/{$fileName}";
-
-        try {
-            // Получаем ссылку для загрузки
-            $response = $client->get("https://cloud-api.yandex.net/v1/disk/resources/upload",  [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath, 'overwrite' => true],
-            ]);
-
-            $data = json_decode($response->getBody(), true);
-
-            // Загружаем файл
-            $client->put($data['href'], [
-                'headers' => ['Content-Type' => $file->getClientMimeType()],
-                'body' => fopen($file->getPathname(), 'rb'),
-            ]);
-
-            // Публикуем файл
-            $client->put("https://cloud-api.yandex.net/v1/disk/resources/publish",  [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath],
-            ]);
-
-            // Получаем публичную ссылку
-            $publicLinkResponse = $client->get("https://cloud-api.yandex.net/v1/disk/resources",  [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath],
-            ]);
-
-            $publicData = json_decode($publicLinkResponse->getBody(), true);
-            return $publicData['file'] ?? null;
-
-        } catch (\Exception $e) {
-            \Log::error('Ошибка загрузки аватара на Яндекс.Диск', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Создание папки на Яндекс.Диске, если её нет
-     */
-    private function createYandexDiskFolder($path)
+    private function uploadToYandexCloud($file)
     {
         try {
-            $client = new Client();
-
-            // Проверяем, существует ли папка
-            try {
-                $client->get("https://cloud-api.yandex.net/v1/disk/resources", [
-                    'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                    'query' => ['path' => $path],
-                ]);
-                return true; // Папка уже есть
-            } catch (ClientException $e) {
-                if ($e->getResponse()->getStatusCode() !== 404) {
-                    throw $e;
-                }
-                // Если 404 — создаём папку
-                $client->put("https://cloud-api.yandex.net/v1/disk/resources", [
-                    'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                    'query' => ['path' => $path],
-                ]);
+            // Проверка MIME-типа
+            $finfo = new \finfo(FILEINFO_MIME_TYPE);
+            $mimeType = $finfo->file($file->getPathname());
+            if (!in_array($mimeType, ['image/jpeg', 'image/png', 'image/jpg'])) {
+                throw new \Exception('Недопустимый тип файла');
             }
 
-            return true;
+            // Генерация уникального имени
+            $fileName = Str::uuid() . '.' . $file->getClientOriginalExtension();
+            $filePath = self::BASE_PATH . $fileName;
 
+            // Загрузка файла
+            $result = Storage::disk('s3')->put($filePath, file_get_contents($file), [
+                'visibility' => 'public',
+                'ContentType' => $mimeType,
+            ]);
+
+            if (!$result) {
+                throw new \Exception('Не удалось загрузить файл');
+            }
+
+            // Проверяем, действительно ли файл существует
+            if (!Storage::disk('s3')->exists($filePath)) {
+                throw new \Exception('Файл не найден после загрузки');
+            }
+
+            // Получаем URL
+            $url = Storage::disk('s3')->url($filePath) . '?disposition=inline';
+
+            return $url;
         } catch (\Exception $e) {
-            \Log::error('Ошибка создания папки на Яндекс.Диске', [
+            \Log::error('Ошибка загрузки аватара на Yandex Cloud', [
                 'error' => $e->getMessage(),
-                'path' => $path,
                 'trace' => $e->getTraceAsString(),
             ]);
             throw $e;
+        }
+    }
+
+    /**
+     * Удаление старого аватара с Yandex Cloud Storage
+     */
+    private function deleteOldAvatarFromCloud(string $url): bool
+    {
+        try {
+            $parsedUrl = parse_url($url);
+            $path = ltrim(strtok($parsedUrl['path'], '/'), '/');
+            if ($path && Storage::disk('s3')->exists($path)) {
+                Storage::disk('s3')->delete($path);
+            }
+            return true;
+        } catch (\Exception $e) {
+            \Log::warning('Ошибка удаления аватара', [
+                'url' => $url,
+                'error' => $e->getMessage(),
+            ]);
+            return false;
         }
     }
 
@@ -134,38 +105,25 @@ class UserController extends Controller
     {
         try {
             $request->validate([
-                'avatar' => 'required|image|mimes:jpeg,png,jpg,gif|max:2048',
+                'avatar' => 'required|image|mimes:jpeg,png,jpg|max:2048',
             ]);
 
             $user = $request->user();
             $file = $request->file('avatar');
 
-            // Загружаем на Яндекс.Диск
-            $directUrl = $this->uploadToYandexDisk($file);
+            // Загружаем новый аватар
+            $directUrl = $this->uploadToYandexCloud($file);
 
-            // Удаляем старый аватар с Яндекс.Диска
-            if ($user->avatar && str_contains($user->avatar, 'yandex')) {
-                $oldPath = parse_url($user->avatar, PHP_URL_PATH);
-                try {
-                    $client = new Client();
-                    $client->delete("https://cloud-api.yandex.net/v1/disk/resources",  [
-                        'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                        'query' => ['path' => $oldPath],
-                    ]);
-                } catch (\Exception $e) {
-                    \Log::warning('Не удалось удалить старый аватар', [
-                        'path' => $oldPath,
-                        'error' => $e->getMessage(),
-                    ]);
-                }
+            // Удаляем старый аватар
+            if ($user->avatar && str_contains($user->avatar, 'yandexcloud')) {
+                $this->deleteOldAvatarFromCloud($user->avatar);
             }
 
-            // Обновляем аватар в базе
+            // Обновляем аватар в БД
             $user->avatar = $directUrl;
             $user->save();
 
             return response()->json(['avatar' => $user->avatar], 200);
-
         } catch (\Exception $e) {
             \Log::error('Ошибка обновления аватара:', [
                 'error' => $e->getMessage(),
@@ -175,6 +133,9 @@ class UserController extends Controller
         }
     }
 
+    /**
+     * Обновление пароля
+     */
     public function changePassword(Request $request)
     {
         $request->validate([
@@ -195,6 +156,9 @@ class UserController extends Controller
         return response()->json(['message' => 'Пароль успешно изменен'], 200);
     }
 
+    /**
+     * Обновление уведомлений
+     */
     public function updateNotifications(Request $request)
     {
         $request->validate([
@@ -208,6 +172,9 @@ class UserController extends Controller
         return response()->json(['message' => 'Настройки уведомлений сохранены'], 200);
     }
 
+    /**
+     * Удаление аккаунта
+     */
     public function deleteAccount(Request $request)
     {
         $user = $request->user();
@@ -216,13 +183,17 @@ class UserController extends Controller
         return response()->json(['message' => 'Аккаунт удален'], 200);
     }
 
+    /**
+     * Получение списка пользователей
+     */
     public function index()
     {
-        return response()->json([
-            'users' => User::all()
-        ]);
+        return response()->json(['users' => User::all()]);
     }
 
+    /**
+     * Блокировка пользователя
+     */
     public function block($id)
     {
         $user = User::find($id);
@@ -231,16 +202,21 @@ class UserController extends Controller
         $user->update([
             'is_blocked' => true,
             'blocked_until' => now()->addDays(7),
-            ]);
+        ]);
+
         return response()->json(['message' => 'Пользователь заблокирован']);
     }
 
+    /**
+     * Разблокировка пользователя
+     */
     public function unblock($id)
     {
         $user = User::find($id);
         if (!$user) return response()->json(['message' => 'Пользователь не найден'], 404);
 
         $user->update(['is_blocked' => false]);
+
         return response()->json(['message' => 'Пользователь разблокирован']);
     }
 }

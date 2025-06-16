@@ -8,156 +8,58 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Cache;
-use GuzzleHttp\Client;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class MediaController extends Controller
 {
-    private $yandexToken;
-    private const YANDEX_BASE_PATH = '/media/discussions/';
-    private const CACHE_TTL_HOURS = 12; // Срок действия кэшированных ссылок
+    private const CACHE_TTL_HOURS = 12; // Срок жизни кэша для ссылок
+    private const BASE_PATH = 'media/discussions/';
 
     public function __construct()
     {
-        $this->yandexToken = config('services.yandex_disk.token');
-
-        if (empty($this->yandexToken) || !is_string($this->yandexToken) || strlen($this->yandexToken) < 10) {
-            Log::error('Некорректный или отсутствующий Yandex Disk token в .env');
-            throw new \Exception('Некорректный или отсутствующий Yandex Disk token');
-        }
+        //
     }
 
     /**
      * Обновление прямой ссылки на файл.
-     *
-     * @param Request $request
-     * @param int $mediaId
-     * @return \Illuminate\Http\JsonResponse
      */
     public function refreshUrl(Request $request, $mediaId)
     {
         try {
-            // Находим запись MediaContent
             $mediaContent = MediaContent::findOrFail($mediaId);
-
-            // Проверяем наличие пути к файлу
             $filePath = $mediaContent->file_path;
             if (empty($filePath)) {
-                Log::error('Путь к файлу отсутствует в базе данных', ['media_id' => $mediaId]);
                 return response()->json(['message' => 'Путь к файлу не найден'], 400);
             }
 
-            // Проверяем существование файла на Яндекс.Диске
-            if (!$this->checkFileExistsOnYandex($filePath)) {
-                Log::error('Файл не найден на Яндекс.Диске', ['media_id' => $mediaId, 'path' => $filePath]);
-                return response()->json(['message' => 'Файл не найден на Яндекс.Диске'], 404);
-            }
+            $directUrl = $this->getDirectLink($filePath);
 
-            // Получаем новую прямую ссылку (с кэшированием)
-            $newUrl = $this->getYandexDirectLink($filePath);
-
-            // Обновляем ссылку в базе данных
             $urlKey = $mediaContent->content_type . '_url';
-            $mediaContent->update([$urlKey => $newUrl]);
+            $mediaContent->update([$urlKey => $directUrl]);
 
-            return response()->json(['url' => $newUrl]);
-
-        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
-            Log::error('Запись MediaContent не найдена', ['media_id' => $mediaId]);
-            return response()->json(['message' => 'Медиа не найдено'], 404);
+            return response()->json(['url' => $directUrl]);
         } catch (\Exception $e) {
-            Log::error('Ошибка обновления ссылки', [
-                'media_id' => $mediaId,
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
+            Log::error('Ошибка обновления ссылки', ['media_id' => $mediaId, 'error' => $e->getMessage()]);
             return response()->json(['message' => 'Ошибка обновления ссылки: ' . $e->getMessage()], 500);
         }
     }
 
     /**
-     * Получение прямой ссылки на файл с кэшированием.
-     *
-     * @param string $filePath
-     * @return string
-     * @throws \Exception
+     * Получение прямой ссылки с кэшированием.
      */
-    private function getYandexDirectLink($filePath)
+    private function getDirectLink(string $filePath): string
     {
-        $cacheKey = 'yandex_direct_link_' . md5($filePath);
-        $cachedUrl = Cache::get($cacheKey);
-
-        if ($cachedUrl) {
-            return $cachedUrl;
-        }
-
-        try {
-            $client = new Client();
-            $response = $client->get("https://cloud-api.yandex.net/v1/disk/resources/download", [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath],
-            ]);
-
-            $data = json_decode($response->getBody(), true);
-            $directUrl = $data['href'] ?? null;
-
-            if (!$directUrl) {
-                throw new \Exception('Не удалось получить прямую ссылку на файл');
-            }
-
-            // Кэшируем ссылку
-            Cache::put($cacheKey, $directUrl, now()->addHours(self::CACHE_TTL_HOURS));
-            return $directUrl;
-        } catch (\GuzzleHttp\Exception\RequestException $e) {
-            Log::error('Ошибка HTTP-запроса к Яндекс.Диску', [
-                'path' => $filePath,
-                'error' => $e->getMessage(),
-            ]);
-            throw new \Exception('Ошибка получения ссылки: ' . $e->getMessage(), 503);
-        } catch (\Exception $e) {
-            Log::error('Общая ошибка получения прямой ссылки', [
-                'path' => $filePath,
-                'error' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
+        $cacheKey = 'yandex_cloud_direct_link_' . md5($filePath);
+        return Cache::remember($cacheKey, now()->addHours(self::CACHE_TTL_HOURS), function () use ($filePath) {
+            return Storage::disk('s3')->url($filePath);
+        });
     }
 
     /**
-     * Проверка существования файла на Яндекс.Диске.
-     *
-     * @param string $filePath
-     * @return bool
+     * Загрузка файла на Yandex Cloud Storage.
      */
-    private function checkFileExistsOnYandex($filePath)
-    {
-        try {
-            $client = new Client();
-            $client->get("https://cloud-api.yandex.net/v1/disk/resources", [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath],
-            ]);
-            return true;
-        } catch (\GuzzleHttp\Exception\ClientException $e) {
-            if ($e->getResponse()->getStatusCode() === 404) {
-                return false;
-            }
-            Log::error('Ошибка проверки существования файла', [
-                'path' => $filePath,
-                'error' => $e->getMessage(),
-            ]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Загрузка файла на Яндекс.Диск.
-     *
-     * @param \Illuminate\Http\UploadedFile $file
-     * @param string $type
-     * @return array
-     * @throws \Exception
-     */
-    private function uploadToYandexDisk($file, $type)
+    private function uploadToYandexCloud($file, $type)
     {
         try {
             // Проверка MIME-типа
@@ -167,110 +69,55 @@ class MediaController extends Controller
                 throw new \Exception('Недопустимый тип файла');
             }
 
-            $fileName = uniqid() . '_' . $file->getClientOriginalName();
-            $filePath = self::YANDEX_BASE_PATH . "{$type}/{$fileName}";
+            // Генерация имени и пути
+            $fileName = Str::uuid() . '.' . $file->getClientOriginalExtension();
+            $filePath = self::BASE_PATH . "{$type}/" . $fileName;
 
-            // Проверяем/создаём папки
-            $this->ensureYandexDiskFolder(self::YANDEX_BASE_PATH . $type);
-
-            // Получаем ссылку для загрузки
-            $client = new Client();
-            $uploadUrlResponse = $client->get("https://cloud-api.yandex.net/v1/disk/resources/upload", [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath, 'overwrite' => true],
+            // Загрузка файла в облако
+            $result = Storage::disk('s3')->put($filePath, file_get_contents($file), [
+                'visibility' => 'public',
+                'ContentType' => $mimeType,
             ]);
 
-            $uploadData = json_decode($uploadUrlResponse->getBody(), true);
-            $uploadHref = $uploadData['href'];
+            if (!$result) {
+                throw new \Exception('Не удалось загрузить файл');
+            }
 
-            // Загружаем файл
-            $client->put($uploadHref, [
-                'headers' => ['Content-Type' => $mimeType],
-                'body' => fopen($file->getPathname(), 'rb'),
-            ]);
+            // Проверка существования файла
+            if (!Storage::disk('s3')->exists($filePath)) {
+                throw new \Exception('Файл не найден после загрузки');
+            }
 
-            // Публикуем файл
-            $client->put("https://cloud-api.yandex.net/v1/disk/resources/publish", [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => ['path' => $filePath],
-            ]);
-
-            // Получаем прямую ссылку
-            $directLink = $this->getYandexDirectLink($filePath);
+            // Получаем URL
+            $url = Storage::disk('s3')->url($filePath) . '?disposition=inline';
 
             return [
                 'filePath' => $filePath,
-                'directUrl' => $directLink,
+                'directUrl' => $url,
                 'fileId' => md5($filePath),
             ];
-        } catch (\GuzzleHttp\Exception\RequestException $e) {
-            Log::error('Ошибка HTTP-запроса к Яндекс.Диску', [
-                'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
-            ]);
-            throw new \Exception('Ошибка загрузки файла: ' . $e->getMessage(), 503);
         } catch (\Exception $e) {
-            Log::error('Общая ошибка загрузки на Яндекс.Диск', [
+            Log::error('Ошибка загрузки на Yandex Cloud', [
                 'error' => $e->getMessage(),
                 'trace' => $e->getTraceAsString(),
             ]);
             throw new \Exception('Не удалось загрузить файл', 500);
         }
     }
-
     /**
-     * Проверяет и создаёт папку на Яндекс.Диске, если она не существует.
-     *
-     * @param string $path
-     * @return bool
-     * @throws \Exception
+     * Удаление файла с Yandex Cloud Storage.
      */
-    private function ensureYandexDiskFolder($path)
+    private function deleteFromYandexCloud(string $filePath): bool
     {
-        $cacheKey = 'yandex_folder_exists_' . md5($path);
-        if (Cache::get($cacheKey)) {
-            return true;
-        }
-
         try {
-            $client = new Client();
-            try {
-                $client->get("https://cloud-api.yandex.net/v1/disk/resources", [
-                    'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                    'query' => ['path' => $path],
-                ]);
-                Cache::put($cacheKey, true, now()->addDays(1));
-                return true;
-            } catch (\GuzzleHttp\Exception\ClientException $e) {
-                if ($e->getResponse()->getStatusCode() !== 404) {
-                    throw $e;
-                }
-                $client->put("https://cloud-api.yandex.net/v1/disk/resources", [
-                    'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                    'query' => ['path' => $path],
-                ]);
-                Cache::put($cacheKey, true, now()->addDays(1));
-                return true;
+            if (Storage::disk('s3')->exists($filePath)) {
+                Storage::disk('s3')->delete($filePath);
             }
+            return true;
         } catch (\Exception $e) {
-            Log::error('Ошибка создания папки на Яндекс.Диске', [
-                'path' => $path,
-                'error' => $e->getMessage(),
-            ]);
-            throw $e;
+            Log::error('Ошибка удаления файла', ['path' => $filePath, 'error' => $e->getMessage()]);
+            return false;
         }
-    }
-
-    /**
-     * Получение прямой ссылки для использования в API.
-     *
-     * @param Request $request
-     * @param int $mediaId
-     * @return \Illuminate\Http\JsonResponse
-     */
-    public function getDirectUrl(Request $request, $mediaId)
-    {
-        return $this->refreshUrl($request, $mediaId);
     }
 
     /**
@@ -280,9 +127,7 @@ class MediaController extends Controller
     {
         try {
             $user = Auth::guard('sanctum')->user();
-            if (!$user) {
-                return response()->json(['message' => 'Требуется авторизация'], 401);
-            }
+            if (!$user) return response()->json(['message' => 'Требуется авторизация'], 401);
 
             $validated = $request->validate([
                 'mediable_id' => 'required|integer',
@@ -295,13 +140,8 @@ class MediaController extends Controller
 
             $mediableType = str_replace(['\\', '/'], '\\', $validated['mediable_type']);
             $model = app($mediableType)::find($validated['mediable_id']);
-
-            if (!$model) {
-                return response()->json(['message' => 'Модель не найдена'], 404);
-            }
-
-            if ($mediableType === 'App\\Models\\Discussion' && $model->user_id !== $user->id) {
-                return response()->json(['message' => 'Доступ запрещён'], 403);
+            if (!$model || ($mediableType === 'App\\Models\\Discussion' && $model->user_id !== $user->id)) {
+                return response()->json(['message' => 'Модель не найдена или доступ запрещён'], 404);
             }
 
             $media = Media::create([
@@ -329,7 +169,7 @@ class MediaController extends Controller
                 }
 
                 $file = $request->file('file');
-                $result = $this->uploadToYandexDisk($file, $validated['type']);
+                $result = $this->uploadToYandexCloud($file, $validated['type']);
 
                 $urlKey = $validated['type'] . '_url';
                 $contentData[$urlKey] = $result['directUrl'];
@@ -359,7 +199,6 @@ class MediaController extends Controller
                     ],
                 ]
             ], 201);
-
         } catch (\Exception $e) {
             Log::error('Ошибка создания медиа:', [
                 'error' => $e->getMessage(),
@@ -370,55 +209,20 @@ class MediaController extends Controller
     }
 
     /**
-     * Удаление файла с Яндекс.Диска.
-     */
-    private function deleteFromYandexDisk($filePath)
-    {
-        try {
-            $client = new Client();
-            $client->delete("https://cloud-api.yandex.net/v1/disk/resources", [
-                'headers' => ['Authorization' => "OAuth {$this->yandexToken}"],
-                'query' => [
-                    'path' => $filePath,
-                    'permanently' => true,
-                ],
-            ]);
-            Log::info('Файл успешно удалён с Яндекс.Диска', ['path' => $filePath]);
-            return true;
-        } catch (\GuzzleHttp\Exception\ClientException $e) {
-            if ($e->getResponse()->getStatusCode() === 404) {
-                Log::warning('Файл не найден на Яндекс.Диске', ['path' => $filePath]);
-                return true;
-            }
-            throw $e;
-        }
-    }
-
-    /**
      * Удаление медиа.
      */
     public function destroy($id)
     {
         try {
             $media = Media::find($id);
-            if (!$media) {
-                Log::warning('Медиа не найдено', ['media_id' => $id]);
-                return response()->json(['message' => 'Медиа не найдено'], 404);
-            }
+            if (!$media) return response()->json(['message' => 'Медиа не найдено'], 404);
 
             $user = Auth::guard('sanctum')->user();
-            if (!$user) {
-                Log::warning('Пользователь не аутентифицирован', ['media_id' => $id]);
-                return response()->json(['message' => 'Требуется авторизация'], 401);
-            }
+            if (!$user) return response()->json(['message' => 'Требуется авторизация'], 401);
 
             if ($media->mediable_type === 'App\\Models\\Discussion') {
                 $discussion = $media->mediable()->first();
                 if (!$discussion || $discussion->user_id !== $user->id) {
-                    Log::warning('Попытка удаления медиа без доступа', [
-                        'media_id' => $id,
-                        'user_id' => $user->id,
-                    ]);
                     return response()->json(['message' => 'Доступ запрещён'], 403);
                 }
             }
@@ -427,18 +231,11 @@ class MediaController extends Controller
 
             if ($mediaContent && in_array($media->type, ['image', 'video', 'music'])) {
                 $filePath = $mediaContent->file_path;
-                if ($filePath) {
-                    $this->deleteFromYandexDisk($filePath);
-                }
+                $this->deleteFromYandexCloud($filePath);
             }
 
-            if ($mediaContent) {
-                $mediaContent->delete();
-                Log::info('Запись media_content удалена', ['media_id' => $id]);
-            }
-
+            if ($mediaContent) $mediaContent->delete();
             $media->delete();
-            Log::info('Медиа успешно удалено', ['media_id' => $id]);
 
             return response()->json(['message' => 'Медиа успешно удалено']);
         } catch (\Exception $e) {
@@ -448,6 +245,120 @@ class MediaController extends Controller
                 'trace' => $e->getTraceAsString(),
             ]);
             return response()->json(['message' => 'Ошибка сервера'], 500);
+        }
+    }
+
+    /**
+     * Получение прямой ссылки.
+     */
+    public function getDirectUrl(Request $request, $mediaId)
+    {
+        return $this->refreshUrl($request, $mediaId);
+    }
+
+    public function index(Request $request)
+    {
+        try {
+            Log::debug('Начало обработки запроса медиа', ['request' => $request->all()]);
+
+            $validated = $request->validate([
+                'mediable_id' => 'required|integer',
+                'mediable_type' => 'required|string',
+            ]);
+
+            $mediableType = $validated['mediable_type'];
+            Log::debug('Обработанный mediable_type', ['mediable_type' => $mediableType]);
+
+            if (!class_exists($mediableType)) {
+                Log::warning('Недопустимый mediable_type', [
+                    'mediable_type' => $mediableType,
+                    'class_exists_manual' => class_exists('App\\Models\\Discussion'),
+                ]);
+                return response()->json(['message' => 'Недопустимый mediable_type'], 400);
+            }
+
+            $model = app($mediableType)::find($validated['mediable_id']);
+            if (!$model) {
+                Log::warning('Модель не найдена', [
+                    'mediable_id' => $validated['mediable_id'],
+                    'mediable_type' => $mediableType,
+                ]);
+                return response()->json(['message' => 'Модель не найдена'], 404);
+            }
+
+            $media = $model->media()->with(['content' => function ($query) {
+                $query->select('id', 'media_id', 'file_id', 'content_type', 'order', 'image_url', 'video_url', 'music_url', 'text_content', 'map_points');
+            }])->get();
+
+            Log::debug('Загруженные медиа', [
+                'media_count' => $media->count(),
+                'media_ids' => $media->pluck('id')->toArray(),
+                'content_loaded' => $media->pluck('content')->toArray(),
+            ]);
+
+            $formattedMedia = $media->map(function ($item) {
+                $content = $item->content;
+                Log::debug('Форматирование медиа', [
+                    'media_id' => $item->id,
+                    'content_exists' => !empty($content),
+                    'content_type' => $content ? $content->content_type : $item->type,
+                    'content_data' => $content ? $content->toArray() : null,
+                ]);
+
+                if (!$content) {
+                    Log::warning('Связь content отсутствует для медиа', [
+                        'media_id' => $item->id,
+                        'type' => $item->type,
+                    ]);
+                }
+
+                return [
+                    'id' => $item->id,
+                    'file_type' => $item->file_type,
+                    'type' => $item->type,
+                    'content_type' => $content ? $content->content_type : $item->type,
+                    'content' => $content ? [
+                        'file_id' => $content->file_id ?? $item->id,
+                        'content_type' => $content->content_type,
+                        'order' => $content->order,
+                        'image_url' => $content->image_url,
+                        'video_url' => $content->video_url,
+                        'music_url' => $content->music_url,
+                        'text_content' => $content->text_content,
+                        'map_points' => $content->map_points,
+                    ] : [
+                        'file_id' => $item->id,
+                        'content_type' => $item->type,
+                        'order' => 0,
+                        'image_url' => $item->type === 'image' ? 'https://placehold.co/80x80' : null,
+                        'video_url' => null,
+                        'music_url' => null,
+                        'text_content' => $item->type === 'text' ? '' : null,
+                        'map_points' => $item->type === 'map' ? [] : null,
+                    ],
+                ];
+            });
+
+            Log::info('Медиа успешно получены', [
+                'mediable_id' => $validated['mediable_id'],
+                'mediable_type' => $mediableType,
+                'media_count' => $media->count(),
+            ]);
+
+            return response()->json(['media' => $formattedMedia]);
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            Log::error('Ошибка валидации медиа', [
+                'errors' => $e->errors(),
+                'request' => $request->all(),
+            ]);
+            return response()->json(['message' => 'Ошибка валидации', 'errors' => $e->errors()], 422);
+        } catch (\Exception $e) {
+            Log::error('Ошибка получения медиа', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+                'request' => $request->all(),
+            ]);
+            return response()->json(['message' => 'Ошибка получения медиа'], 500);
         }
     }
 }
