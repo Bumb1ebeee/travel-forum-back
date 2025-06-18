@@ -68,11 +68,34 @@ class PopularController extends Controller
         $categoryId = $request->query('category_id');
         $page = $request->query('page', 1);
         $perPage = 10;
+        $sortBy = $request->query('sort_by', 'most_viewed'); // По умолчанию most_viewed
+        $user = $request->user();
 
-        // Fetch discussions
+        \Log::info('Popular discussions request', [
+            'category_id' => $categoryId,
+            'page' => $page,
+            'sort_by' => $sortBy,
+        ]);
+
+        // Базовый запрос
         $query = Discussion::with(['user', 'category', 'media', 'tags'])
-            ->where('status', 'approved')
-            ->orderBy('views', 'desc');
+            ->where('status', 'approved');
+
+        // Сортировка
+        switch ($sortBy) {
+            case 'newest':
+                $query->orderByDesc('published_at');
+                break;
+            case 'popular':
+                $query->orderByDesc('views');
+                break;
+            case 'most_viewed':
+                $query->orderByDesc('views');
+                break;
+            default:
+                $query->orderByDesc('views'); // Дефолтная сортировка
+                \Log::warning('Invalid sort_by parameter', ['sort_by' => $sortBy]);
+        }
 
         if ($categoryId) {
             $query->where('category_id', $categoryId);
@@ -80,9 +103,9 @@ class PopularController extends Controller
 
         $discussions = $query->paginate($perPage, ['*'], 'page', $page);
 
-        // Fetch 2 popular tags
+        // Получаем популярные теги
         $tags = Tag::withCount('discussions')
-            ->orderBy('discussions_count', 'desc')
+            ->orderByDesc('discussions_count')
             ->take(2)
             ->get(['id', 'name', 'discussions_count']);
 
@@ -95,7 +118,7 @@ class PopularController extends Controller
                 'per_page' => $discussions->perPage(),
             ],
             'tags' => $tags,
-        ]);
+        ], 200);
     }
 
     public function getPersonalizedDiscussions(Request $request)
@@ -103,13 +126,20 @@ class PopularController extends Controller
         $categoryId = $request->query('category_id');
         $page = $request->query('page', 1);
         $perPage = 10;
+        $sortBy = $request->query('sort_by', 'most_viewed');
         $user = $request->user();
+
+        \Log::info('Personalized discussions request', [
+            'category_id' => $categoryId,
+            'page' => $page,
+            'sort_by' => $sortBy,
+            'user_id' => $user?->id,
+        ]);
 
         $query = Discussion::with(['user', 'category', 'media', 'tags'])
             ->where('status', 'approved');
 
         if ($user) {
-            // Get tags from user's viewed discussions
             $viewedTags = \DB::table('views')
                 ->join('discussion_tag', 'views.discussion_id', '=', 'discussion_tag.discussion_id')
                 ->join('tags', 'discussion_tag.tag_id', '=', 'tags.id')
@@ -117,24 +147,35 @@ class PopularController extends Controller
                 ->pluck('tags.id')
                 ->unique();
 
-            // Prioritize discussions with those tags
             $query->whereHas('tags', function ($q) use ($viewedTags) {
                 $q->whereIn('tags.id', $viewedTags);
-            })->orWhereDoesntHave('tags'); // Fallback to discussions without tags
-        } else {
-            // Fallback to popular discussions if no user
-            $query->orderBy('views', 'desc');
+            })->orWhereDoesntHave('tags');
         }
 
         if ($categoryId) {
             $query->where('category_id', $categoryId);
         }
 
-        $discussions = $query->orderBy('views', 'desc')->paginate($perPage, ['*'], 'page', $page);
+        // Сортировка
+        switch ($sortBy) {
+            case 'newest':
+                $query->orderByDesc('published_at');
+                break;
+            case 'popular':
+                $query->orderByDesc('views');
+                break;
+            case 'most_viewed':
+                $query->orderByDesc('views');
+                break;
+            default:
+                $query->orderByDesc('views');
+                \Log::warning('Invalid sort_by parameter', ['sort_by' => $sortBy]);
+        }
 
-        // Fetch 2 popular tags
+        $discussions = $query->paginate($perPage, ['*'], 'page', $page);
+
         $tags = Tag::withCount('discussions')
-            ->orderBy('discussions_count', 'desc')
+            ->orderByDesc('discussions_count')
             ->take(2)
             ->get(['id', 'name', 'discussions_count']);
 
@@ -147,7 +188,7 @@ class PopularController extends Controller
                 'per_page' => $discussions->perPage(),
             ],
             'tags' => $tags,
-        ]);
+        ], 200);
     }
 
     public function discussionsByTag($tagName)
