@@ -123,7 +123,6 @@ class ReportController extends Controller
             }
 
             // Проверка прав модерации
-            if ($user->role !== 'moderator' && $user->role !== 'admin') {
                 if ($report->reportable_type === 'App\Models\Reply') {
                     $reply = $report->reportable;
                     if (!$reply || $reply->discussion?->user_id !== $user->id) {
@@ -132,7 +131,6 @@ class ReportController extends Controller
                 } else {
                     return response()->json(['message' => 'Доступ запрещён'], 403);
                 }
-            }
 
             // Обновляем статус жалобы
             $report->update([
@@ -260,20 +258,17 @@ class ReportController extends Controller
             return response()->json(['message' => 'Unauthorized'], 401);
         }
 
-        $reports = Report::where('reportable_type', 'App\Models\Reply')
-            ->whereHas('reportable', function ($query) use ($user) {
-                $query->where('user_id', $user->id);
-            })
+        $reports = Report::where('reportable_type', 'App\Models\Discussion') // Изменено: теперь ищем жалобы на обсуждения
+        ->whereHas('reportable', function ($query) use ($user) {
+            $query->where('user_id', $user->id); // Проверяем, что обсуждение принадлежит пользователю
+        })
             ->where('status', 'pending')
             ->with([
                 'reporter' => function ($query) {
                     $query->select('id', 'name');
                 },
                 'reportable' => function ($query) {
-                    $query->select('id', 'discussion_id', 'user_id', 'content')
-                        ->with(['discussion' => function ($subQuery) {
-                            $subQuery->select('id', 'title', 'user_id');
-                        }]);
+                    $query->select('id', 'title', 'user_id', 'content'); // Теперь это Discussion
                 }
             ])
             ->latest()
@@ -285,7 +280,6 @@ class ReportController extends Controller
             'first_report' => $reports->first() ? [
                 'reportable_type' => $reports->first()->reportable_type,
                 'reportable_id' => $reports->first()->reportable_id,
-                'discussion_id' => $reports->first()->reportable?->discussion_id,
             ] : null,
         ]);
 

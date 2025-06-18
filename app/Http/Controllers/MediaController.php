@@ -162,7 +162,7 @@ class MediaController extends Controller
             if ($validated['type'] === 'text') {
                 $contentData['text_content'] = $validated['text_content'];
             } elseif ($validated['type'] === 'map') {
-                $contentData['map_points'] = json_encode($validated['map_points']);
+                $contentData['map_points'] = $validated['map_points'] ?? [];
             } elseif (in_array($validated['type'], ['image', 'video', 'music'])) {
                 if (!$request->hasFile('file')) {
                     return response()->json(['message' => 'Файл обязателен для данного типа медиа'], 400);
@@ -361,4 +361,96 @@ class MediaController extends Controller
             return response()->json(['message' => 'Ошибка получения медиа'], 500);
         }
     }
+
+
+    public function update(Request $request, $id)
+    {
+        try {
+            // Находим медиа и связанный контент
+            $media = Media::findOrFail($id);
+            $mediaContent = MediaContent::where('media_id', $media->id)->firstOrFail();
+
+            // Условная валидация в зависимости от типа медиа
+            if ($media->type === 'text') {
+                $validated = $request->validate([
+                    'text_content' => 'required|string|max:65535',
+                ]);
+
+                Log::debug('Updating text media:', [
+                    'id' => $id,
+                    'text_content' => $validated['text_content'],
+                ]);
+
+                // Обновляем текстовое содержимое
+                $mediaContent->text_content = $validated['text_content'];
+                $mediaContent->content_type = 'text/plain';
+                $mediaContent->save();
+
+                Log::info('Text media updated successfully:', ['media_id' => $media->id]);
+            } else {
+                $validated = $request->validate([
+                    'file' => 'required|file|mimes:jpeg,png,gif,webp,mp4,mov,mp3,wav|max:102400',
+                    'file_type' => 'required|string',
+                    'type' => 'required|string|in:image,video,music',
+                    'mediable_id' => 'required',
+                    'mediable_type' => 'required|string',
+                ]);
+
+                Log::debug('Media update input:', ['id' => $id, 'validated' => $validated]);
+
+                // Проверка соответствия типа и владельца
+                if (
+                    $media->type !== $validated['type'] ||
+                    $media->mediable_id != $validated['mediable_id'] ||
+                    $media->mediable_type !== $validated['mediable_type']
+                ) {
+                    return response()->json(['error' => 'Недопустимое изменение типа или владельца медиа'], 400);
+                }
+
+                $media->file_type = $validated['file_type'];
+                $media->save();
+
+                $mediaContent->save();
+
+                Log::info('Media updated successfully:', [
+                    'media_id' => $media->id,
+                    'url' => $mediaContent->{$media->type . '_url'},
+                ]);
+            }
+
+            // Формируем ответ API
+            return response()->json([
+                'media' => [
+                    'id' => $media->id,
+                    'type' => $media->type,
+                    'file_type' => $media->file_type,
+                    'content' => [
+                        'file_id' => $mediaContent->file_id,
+                        'content_type' => $mediaContent->content_type,
+                        'order' => $mediaContent->order,
+                        'text_content' => $mediaContent->text_content,
+                        'image_url' => $mediaContent->image_url,
+                        'video_url' => $mediaContent->video_url,
+                        'music_url' => $mediaContent->music_url,
+                        'map_points' => $mediaContent->map_points,
+                    ],
+                ],
+            ]);
+        } catch (ValidationException $e) {
+            Log::error('Validation error updating media:', [
+                'id' => $id,
+                'errors' => $e->errors(),
+            ]);
+            return response()->json(['error' => $e->errors()], 422);
+        } catch (\Exception $e) {
+            Log::error('Ошибка при обновлении медиа: ' . $e->getMessage(), [
+                'id' => $id,
+                'request' => $request->all(),
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+            return response()->json(['error' => 'Ошибка сервера'], 500);
+        }
+    }
+
 }
