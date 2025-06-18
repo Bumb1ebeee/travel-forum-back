@@ -250,26 +250,30 @@ class ReportController extends Controller
         }
     }
 
-    public function myResponseReports(Request $request)
+     public function myResponseReports(Request $request)
     {
         $user = Auth::user();
-
         if (!$user) {
             return response()->json(['message' => 'Unauthorized'], 401);
         }
 
-        $reports = Report::where('reportable_type', 'App\Models\Discussion') // Изменено: теперь ищем жалобы на обсуждения
+        // Получаем жалобы на модели типа Reply, которые находятся в обсуждениях,
+        // принадлежащих текущему пользователю
+        $reports = Report::where('reportable_type', 'App\Models\Reply') // Жалобы именно на ответы
         ->whereHas('reportable', function ($query) use ($user) {
-            $query->where('user_id', $user->id); // Проверяем, что обсуждение принадлежит пользователю
+            // reportable — это Reply, и мы проверяем его обсуждение (discussion)
+            $query->whereHas('discussion', function ($q) use ($user) {
+                $q->where('user_id', $user->id); // обсуждение принадлежит пользователю
+            });
         })
-            ->where('status', 'pending')
+            ->where('status', 'pending') // только нерассмотренные
             ->with([
-                'reporter' => function ($query) {
-                    $query->select('id', 'name');
-                },
+                'reporter:id,name',
                 'reportable' => function ($query) {
-                    $query->select('id', 'title', 'user_id', 'content'); // Теперь это Discussion
-                }
+                    // Загружаем поля из Reply
+                    $query->select('id', 'content', 'discussion_id', 'user_id');
+                },
+                'reportable.discussion:id,title,user_id' // опционально: загрузка данных обсуждения
             ])
             ->latest()
             ->paginate(10);
