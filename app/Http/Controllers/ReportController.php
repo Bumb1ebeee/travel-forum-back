@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Reply;
 use App\Models\Report;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -250,41 +251,46 @@ class ReportController extends Controller
         }
     }
 
-     public function myResponseReports(Request $request)
+    public function myResponseReports(Request $request)
     {
         $user = Auth::user();
         if (!$user) {
             return response()->json(['message' => 'Unauthorized'], 401);
         }
 
-        // Получаем жалобы на модели типа Reply, которые находятся в обсуждениях,
-        // принадлежащих текущему пользователю
-        $reports = Report::where('reportable_type', 'App\Models\Reply') // Жалобы именно на ответы
-        ->whereHas('reportable', function ($query) use ($user) {
-            // reportable — это Reply, и мы проверяем его обсуждение (discussion)
-            $query->whereHas('discussion', function ($q) use ($user) {
-                $q->where('user_id', $user->id); // обсуждение принадлежит пользователю
-            });
-        })
-            ->where('status', 'pending') // только нерассмотренные
+        Log::info('myResponseReports started', ['user_id' => $user->id]);
+
+        $reports = Report::where('status', 'pending')
+            ->whereHasMorph('reportable', [Reply::class], function ($query, $type) use ($user) {
+                Log::info('Checking reportable', ['user_id' => $user->id, 'type' => $type]);
+                $query->whereHas('discussion', function ($q) use ($user) {
+                    Log::info('Checking discussion', ['user_id' => $user->id]);
+                    $q->where('user_id', $user->id);
+                });
+            })
             ->with([
-                'reporter:id,name',
-                'reportable' => function ($query) {
-                    // Загружаем поля из Reply
-                    $query->select('id', 'content', 'discussion_id', 'user_id');
+                'reporter' => function ($query) {
+                    Log::info('Loading reporter relation');
+                    $query->select('id', 'name');
                 },
-                'reportable.discussion:id,title,user_id' // опционально: загрузка данных обсуждения
+                'reportable' => function ($query) {
+                    Log::info('Loading reportable relation');
+                    $query->select('id', 'content', 'discussion_id', 'user_id')
+                        ->with([
+                            'discussion' => function ($q) {
+                                Log::info('Loading discussion relation');
+                                $q->select('id', 'title', 'user_id');
+                            }
+                        ]);
+                },
             ])
             ->latest()
             ->paginate(10);
 
-        \Log::info('myResponseReports fetched', [
+        Log::info('myResponseReports fetched', [
             'user_id' => $user->id,
             'report_count' => $reports->total(),
-            'first_report' => $reports->first() ? [
-                'reportable_type' => $reports->first()->reportable_type,
-                'reportable_id' => $reports->first()->reportable_id,
-            ] : null,
+            'first_report' => $reports->first()?->toArray(),
         ]);
 
         return response()->json([
